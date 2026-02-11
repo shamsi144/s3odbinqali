@@ -5,14 +5,10 @@ import OpenAI from "openai";
 const app = express();
 
 /* =========================
-   GLOBAL SAFETY LOGGING
+   BASIC HARDENING / LOGGING
 ========================= */
-process.on("unhandledRejection", (err) => {
-  console.error("UNHANDLED REJECTION:", err);
-});
-process.on("uncaughtException", (err) => {
-  console.error("UNCAUGHT EXCEPTION:", err);
-});
+process.on("unhandledRejection", (err) => console.error("UNHANDLED:", err));
+process.on("uncaughtException", (err) => console.error("UNCAUGHT:", err));
 
 /* =========================
    MIDDLEWARE
@@ -24,14 +20,12 @@ app.use(cors({
 }));
 app.options("*", cors());
 
-app.use(express.json({ limit: "5mb" }));
+app.use(express.json({ limit: "10mb" }));
 
 /* =========================
    OPENAI CLIENT
 ========================= */
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
-});
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 /* =========================
    HEALTH CHECK
@@ -42,82 +36,69 @@ app.get("/ping", (req, res) => {
 });
 
 /* =========================
-   AI ANALYZER (OPEN-MINDED)
+   AI ENDPOINT
 ========================= */
 app.post("/ask", async (req, res) => {
   try {
     const { room, question, summary, kpis } = req.body || {};
 
     if (!process.env.OPENAI_API_KEY) {
-      return res.status(500).json({
-        error: "OPENAI_API_KEY missing on server"
-      });
+      return res.status(500).json({ error: "OPENAI_API_KEY missing on server" });
     }
 
     if (!question || typeof question !== "string") {
-      return res.status(400).json({
-        error: "Question is missing or invalid"
-      });
+      return res.status(400).json({ error: "Question is missing or invalid" });
     }
 
-    /* =========================
-       OPEN-MINDED SYSTEM PROMPT
-    ========================= */
+    // "Unlimited-style" prompt: general reasoning allowed, no strict data-only constraint.
+    // Still encourages being transparent when assumptions are made.
     const systemPrompt = `
-You are an intelligent, open-minded operations analyst
-for a tactical command center dashboard.
+You are a highly capable operations + strategy analyst for a tactical command center dashboard.
 
-CORE BEHAVIOR RULES:
-- Be helpful and practical.
-- Never refuse to answer unless it is truly impossible.
-- If exact KPIs are missing, infer reasonably.
-- If grouping is missing, assume 1 row = 1 egg when logical.
-- Use common sense and operational reasoning.
-- Clearly state assumptions before conclusions.
-- Prefer usefulness over strict correctness.
-- If data is weak, explain what you inferred and why.
+GOAL:
+Be maximally helpful. Do not refuse just because data is incomplete.
+Use general knowledge + reasoning + whatever room data is provided.
 
-YOU ARE ALLOWED TO:
-- Infer meaning from column names and row counts
-- Assume rows represent events (eggs, chicks, records)
-- Suggest improvements instead of refusing
-- Give insights even with partial data
+RULES:
+- You MAY answer using general knowledge even if KPIs/summary are missing.
+- If you use assumptions, state them briefly (but do not be annoying about it).
+- If the user asks something that could be computed from data but data isn't provided, do a best-effort guess AND suggest the exact data/grouping needed to compute it precisely.
+- If the question is vague ("tell me something"), proactively provide 3–6 useful insights/actions.
+- If the user asks "most eggs" and there is no grouping, assume each row is one egg if that seems reasonable, and explain how to make it exact (grouping by ring/female).
+- Keep answers concise, tactical, and action-oriented.
 
-YOU MUST NOT:
-- Say "data is insufficient" without explanation
-- Act like a strict accountant
-- Ignore obvious patterns
-
-CURRENT CONTEXT:
+CONTEXT (may be empty):
 Room: ${room || "UNKNOWN"}
 
-KPIs:
+KPIs (may be empty):
 ${JSON.stringify(kpis || {}, null, 2)}
 
-Summary:
+Summary (may be empty):
 ${JSON.stringify(summary || {}, null, 2)}
-`;
+`.trim();
 
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
-      temperature: 0.5,
+      temperature: 0.7,
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: question }
       ]
     });
 
-    const answer =
-      completion?.choices?.[0]?.message?.content ||
-      "No response generated.";
-
+    const answer = completion?.choices?.[0]?.message?.content || "No response generated.";
     return res.json({ answer });
 
   } catch (err) {
     console.error("ASK ERROR:", err);
-    return res.status(500).json({
+
+    // Pass-through useful OpenAI errors (quota, auth) without crashing
+    const msg = String(err?.message || err);
+    const status = msg.includes("429") ? 429 : msg.includes("401") ? 401 : 500;
+
+    return res.status(status).json({
       error: "ask failed",
-      details: String(err?.message || err)
+      details: msg
     });
   }
 });
